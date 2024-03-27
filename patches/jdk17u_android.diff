@@ -2519,6 +2519,6 @@ index be578a0bb..ce5e8b400 100644
  // not relying on included headers.
  
 -#ifndef __GLIBC__
-+#ifndef __GLIBC__ && __ANDROID__
++#if !defined(__GLIBC__) && !defined(__ANDROID__)
  // Alpine doesn't know these types, define them
  typedef unsigned int       __uint32_t;
