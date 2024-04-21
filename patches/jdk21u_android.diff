@@ -1,4 +1,5 @@
-Subject: [PATCH] jdk21u_android
+Subject: [PATCH] Merge branch 'refs/heads/jdk21.0.1' into jdk-21.0.3+9
+jdk21u_android
 jdk21u_android
 ---
 Index: make/autoconf/flags-cflags.m4
@@ -8,17 +9,125 @@ Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
 ===================================================================
 diff --git a/make/autoconf/flags-cflags.m4 b/make/autoconf/flags-cflags.m4
 --- a/make/autoconf/flags-cflags.m4	(revision 060c4f7589e7f13febd402f4dac3320f4c032b08)
-+++ b/make/autoconf/flags-cflags.m4	(revision b739ccbad43fd9456e30fd990bf90d966150ee1f)
-@@ -426,7 +426,8 @@
++++ b/make/autoconf/flags-cflags.m4	(revision 66ffa08a1eb301a088b8f50882b0c882ccbf179f)
+@@ -1,5 +1,5 @@
+ #
+-# Copyright (c) 2011, 2023, Oracle and/or its affiliates. All rights reserved.
++# Copyright (c) 2011, 2024, Oracle and/or its affiliates. All rights reserved.
+ # DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+ #
+ # This code is free software; you can redistribute it and/or modify it
+@@ -117,6 +117,11 @@
+       FLAGS_COMPILER_CHECK_ARGUMENTS(ARGUMENT: [${DEBUG_PREFIX_CFLAGS}],
+         IF_FALSE: [
+             DEBUG_PREFIX_CFLAGS=
++        ],
++        IF_TRUE: [
++            # Add debug prefix map gcc system include paths, as they cause
++            # non-deterministic debug paths depending on gcc path location.
++            DEBUG_PREFIX_MAP_GCC_INCLUDE_PATHS
+         ]
+       )
+     fi
+@@ -158,6 +163,55 @@
+   AC_SUBST(ASFLAGS_DEBUG_SYMBOLS)
+ ])
+ 
++# gcc will embed the full system include paths in the debug info
++# resulting in non-deterministic debug symbol files and thus
++# non-reproducible native libraries if gcc includes are located
++# in different paths.
++# Add -fdebug-prefix-map'ings for root and gcc include paths,
++# pointing to a common set of folders so that the binaries are deterministic:
++#  root include : /usr/include
++#  gcc include  : /usr/local/gcc_include
++#  g++ include  : /usr/local/gxx_include
++AC_DEFUN([DEBUG_PREFIX_MAP_GCC_INCLUDE_PATHS],
++[
++    # Determine gcc system include paths.
++    # Assume default roots to start with:
++    GCC_ROOT_INCLUDE="/usr/include"
++
++    # Determine is sysroot or devkit specified?
++    if test "x$SYSROOT" != "x"; then
++      GCC_ROOT_INCLUDE="${SYSROOT%/}/usr/include"
++    fi
++
++    # Add root include mapping => /usr/include
++    GCC_INCLUDE_DEBUG_MAP_FLAGS="-fdebug-prefix-map=${GCC_ROOT_INCLUDE}/=/usr/include/"
++
++    # Add gcc system include mapping => /usr/local/gcc_include
++    #   Find location of stddef.h using build C compiler
++    GCC_SYSTEM_INCLUDE=`$ECHO "#include <stddef.h>" | \
++                        $CC $CFLAGS -v -E - 2>&1 | \
++                        $GREP stddef | $TAIL -1 | $TR -s " " | $CUT -d'"' -f2`
++    if test "x$GCC_SYSTEM_INCLUDE" != "x"; then
++      GCC_SYSTEM_INCLUDE=`$DIRNAME $GCC_SYSTEM_INCLUDE`
++      GCC_INCLUDE_DEBUG_MAP_FLAGS="$GCC_INCLUDE_DEBUG_MAP_FLAGS \
++          -fdebug-prefix-map=${GCC_SYSTEM_INCLUDE}/=/usr/local/gcc_include/"
++    fi
++
++    # Add g++ system include mapping => /usr/local/gxx_include
++    #   Find location of cstddef using build C++ compiler
++    GXX_SYSTEM_INCLUDE=`$ECHO "#include <cstddef>" | \
++                        $CXX $CXXFLAGS -v -E -x c++ - 2>&1 | \
++                        $GREP cstddef | $TAIL -1 | $TR -s " " | $CUT -d'"' -f2`
++    if test "x$GXX_SYSTEM_INCLUDE" != "x"; then
++      GXX_SYSTEM_INCLUDE=`$DIRNAME $GXX_SYSTEM_INCLUDE`
++      GCC_INCLUDE_DEBUG_MAP_FLAGS="$GCC_INCLUDE_DEBUG_MAP_FLAGS \
++          -fdebug-prefix-map=${GXX_SYSTEM_INCLUDE}/=/usr/local/gxx_include/"
++    fi
++
++    # Add to debug prefix cflags
++    DEBUG_PREFIX_CFLAGS="$DEBUG_PREFIX_CFLAGS $GCC_INCLUDE_DEBUG_MAP_FLAGS"
++])
++
+ AC_DEFUN([FLAGS_SETUP_WARNINGS],
+ [
+   # Set default value.
+@@ -425,8 +479,9 @@
+ [
    #### OS DEFINES, these should be independent on toolchain
    if test "x$OPENJDK_TARGET_OS" = xlinux; then
-     CFLAGS_OS_DEF_JVM="-DLINUX"
+-    CFLAGS_OS_DEF_JVM="-DLINUX"
 -    CFLAGS_OS_DEF_JDK="-D_GNU_SOURCE -D_REENTRANT -D_LARGEFILE64_SOURCE"
++    CFLAGS_OS_DEF_JVM="-DLINUX -D_FILE_OFFSET_BITS=64"
 +    # CFLAGS_OS_DEF_JDK="-D_GNU_SOURCE -D_REENTRANT -D_LARGEFILE64_SOURCE"
 +    CFLAGS_OS_DEF_JDK="-D_GNU_SOURCE -D_REENTRANT -D_LARGEFILE64_SOURCE -D__USE_BSD"
    elif test "x$OPENJDK_TARGET_OS" = xmacosx; then
      CFLAGS_OS_DEF_JVM="-D_ALLBSD_SOURCE -D_DARWIN_C_SOURCE -D_XOPEN_SOURCE"
      CFLAGS_OS_DEF_JDK="-D_ALLBSD_SOURCE -D_DARWIN_UNLIMITED_SELECT"
+@@ -816,6 +871,7 @@
+             REPRODUCIBLE_CFLAGS=
+         ]
+     )
++    AC_SUBST(REPRODUCIBLE_CFLAGS)
+   fi
+ 
+   # Prevent the __FILE__ macro from generating absolute paths into the built
+@@ -849,6 +905,22 @@
+               FILE_MACRO_CFLAGS=
+           ]
+       )
++      if test "x$FILE_MACRO_CFLAGS" != x; then
++        # Add -pathmap for all VS system include paths using Windows
++        # full Long path name that is generated by the compiler
++        # Not enabled under WSL as there is no easy way to obtain the
++        # Windows full long paths, thus reproducible WSL builds will
++        # depend on building with the same VS toolchain install location.
++        if test "x$OPENJDK_BUILD_OS_ENV" != "xwindows.wsl1" && test "x$OPENJDK_BUILD_OS_ENV" != "xwindows.wsl2"; then
++          for ipath in ${$3SYSROOT_CFLAGS}; do
++              if test "x${ipath:0:2}" == "x-I"; then
++                  ipath_path=${ipath#"-I"}
++                  UTIL_FIXUP_WIN_LONG_PATH(ipath_path)
++                  FILE_MACRO_CFLAGS="$FILE_MACRO_CFLAGS -pathmap:\"$ipath_path\"=vsi"
++              fi
++          done
++        fi
++      fi
+     fi
+ 
+     AC_MSG_CHECKING([how to prevent absolute paths in output])
 Index: make/autoconf/flags-ldflags.m4
 IDEA additional info:
 Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
@@ -63,7 +172,7 @@ Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
 ===================================================================
 diff --git a/make/autoconf/libraries.m4 b/make/autoconf/libraries.m4
 --- a/make/autoconf/libraries.m4	(revision 060c4f7589e7f13febd402f4dac3320f4c032b08)
-+++ b/make/autoconf/libraries.m4	(revision b739ccbad43fd9456e30fd990bf90d966150ee1f)
++++ b/make/autoconf/libraries.m4	(revision 66ffa08a1eb301a088b8f50882b0c882ccbf179f)
 @@ -42,8 +42,8 @@
  AC_DEFUN_ONCE([LIB_DETERMINE_DEPENDENCIES],
  [
@@ -86,6 +195,19 @@ diff --git a/make/autoconf/libraries.m4 b/make/autoconf/libraries.m4
      NEEDS_LIB_FONTCONFIG=false
    else
      # All other instances need fontconfig, even if building headless only,
+@@ -108,12 +108,6 @@
+       BASIC_JVM_LIBS_$1="$BASIC_JVM_LIBS_$1 -latomic"
+     fi
+   fi
+-
+-  # Because RISC-V only has word-sized atomics, it requires libatomic where
+-  # other common architectures do not, so link libatomic by default.
+-  if test "x$OPENJDK_$1_OS" = xlinux && test "x$OPENJDK_$1_CPU" = xriscv64; then
+-    BASIC_JVM_LIBS_$1="$BASIC_JVM_LIBS_$1 -latomic"
+-  fi
+ ])
+ 
+ ################################################################################
 Index: make/autoconf/platform.m4
 IDEA additional info:
 Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
@@ -112,8 +234,26 @@ Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
 ===================================================================
 diff --git a/make/autoconf/toolchain.m4 b/make/autoconf/toolchain.m4
 --- a/make/autoconf/toolchain.m4	(revision 060c4f7589e7f13febd402f4dac3320f4c032b08)
-+++ b/make/autoconf/toolchain.m4	(revision b739ccbad43fd9456e30fd990bf90d966150ee1f)
-@@ -944,11 +944,14 @@
++++ b/make/autoconf/toolchain.m4	(revision 66ffa08a1eb301a088b8f50882b0c882ccbf179f)
+@@ -1,5 +1,5 @@
+ #
+-# Copyright (c) 2011, 2023, Oracle and/or its affiliates. All rights reserved.
++# Copyright (c) 2011, 2024, Oracle and/or its affiliates. All rights reserved.
+ # DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+ #
+ # This code is free software; you can redistribute it and/or modify it
+@@ -389,6 +389,10 @@
+   # This is necessary since AC_PROG_CC defaults CFLAGS to "-g -O2"
+   CFLAGS="$ORG_CFLAGS"
+   CXXFLAGS="$ORG_CXXFLAGS"
++
++  # filter out some unwanted additions autoconf may add to CXX; we saw this on macOS with autoconf 2.72
++  UTIL_GET_NON_MATCHING_VALUES(cxx_filtered, $CXX, -std=c++11 -std=gnu++11)
++  CXX="$cxx_filtered"
+ ])
+ 
+ # Check if a compiler is of the toolchain type we expect, and save the version
+@@ -944,11 +948,14 @@
  
      PATH="$OLDPATH"
  
@@ -140,7 +280,7 @@ Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
 ===================================================================
 diff --git a/make/common/JdkNativeCompilation.gmk b/make/common/JdkNativeCompilation.gmk
 --- a/make/common/JdkNativeCompilation.gmk	(revision 060c4f7589e7f13febd402f4dac3320f4c032b08)
-+++ b/make/common/JdkNativeCompilation.gmk	(revision b739ccbad43fd9456e30fd990bf90d966150ee1f)
++++ b/make/common/JdkNativeCompilation.gmk	(revision 66ffa08a1eb301a088b8f50882b0c882ccbf179f)
 @@ -41,6 +41,12 @@
        $(TOPDIR)/src/$(strip $1)/$(OPENJDK_TARGET_OS_TYPE)/native/lib$(strip $2) \
        $(TOPDIR)/src/$(strip $1)/share/native/lib$(strip $2)))
@@ -154,6 +294,15 @@ diff --git a/make/common/JdkNativeCompilation.gmk b/make/common/JdkNativeCompila
  FindSrcDirsForComponent += \
    $(call uniq, $(wildcard \
        $(TOPDIR)/src/$(strip $1)/$(OPENJDK_TARGET_OS)/native/$(strip $2) \
+@@ -98,7 +104,7 @@
+ 
+ JDK_RCFLAGS=$(RCFLAGS) \
+     -D"JDK_VERSION_STRING=$(VERSION_STRING)" \
+-    -D"JDK_COMPANY=$(COMPANY_NAME)" \
++    -D"JDK_COMPANY=$(JDK_RC_COMPANY_NAME)" \
+     -D"JDK_VER=$(VERSION_NUMBER_FOUR_POSITIONS)" \
+     -D"JDK_COPYRIGHT=Copyright \xA9 $(COPYRIGHT_YEAR)" \
+     -D"JDK_NAME=$(JDK_RC_NAME) $(VERSION_SHORT)" \
 Index: make/common/Modules.gmk
 IDEA additional info:
 Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
@@ -201,16 +350,36 @@ Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
 ===================================================================
 diff --git a/make/hotspot/lib/JvmMapfile.gmk b/make/hotspot/lib/JvmMapfile.gmk
 --- a/make/hotspot/lib/JvmMapfile.gmk	(revision 060c4f7589e7f13febd402f4dac3320f4c032b08)
-+++ b/make/hotspot/lib/JvmMapfile.gmk	(revision b739ccbad43fd9456e30fd990bf90d966150ee1f)
-@@ -52,7 +52,7 @@
++++ b/make/hotspot/lib/JvmMapfile.gmk	(revision 66ffa08a1eb301a088b8f50882b0c882ccbf179f)
+@@ -52,8 +52,8 @@
  # Create a dynamic list of symbols from the built object files. This is highly
  # platform dependent.
  
 -ifeq ($(call isTargetOs, linux), true)
+-  DUMP_SYMBOLS_CMD := $(NM) --defined-only *$(OBJ_SUFFIX)
 +ifeq ($(call isTargetOs, android linux), true)
-   DUMP_SYMBOLS_CMD := $(NM) --defined-only *$(OBJ_SUFFIX)
++  DUMP_SYMBOLS_CMD := $(NM) $(NMFLAGS) --defined-only *$(OBJ_SUFFIX)
    ifneq ($(FILTER_SYMBOLS_PATTERN), )
      FILTER_SYMBOLS_PATTERN := $(FILTER_SYMBOLS_PATTERN)|
+   endif
+@@ -67,7 +67,7 @@
+ else ifeq ($(call isTargetOs, macosx), true)
+   # nm on macosx prints out "warning: nm: no name list" to stderr for
+   # files without symbols. Hide this, even at the expense of hiding real errors.
+-  DUMP_SYMBOLS_CMD := $(NM) -Uj *$(OBJ_SUFFIX) 2> /dev/null
++  DUMP_SYMBOLS_CMD := $(NM) $(NMFLAGS) -Uj *$(OBJ_SUFFIX) 2> /dev/null
+   ifneq ($(FILTER_SYMBOLS_PATTERN), )
+     FILTER_SYMBOLS_PATTERN := $(FILTER_SYMBOLS_PATTERN)|
+   endif
+@@ -89,7 +89,7 @@
+   # which may be installed under /opt/freeware/bin. So better use an absolute path here!
+   # NM=/usr/bin/nm
+ 
+-  DUMP_SYMBOLS_CMD := $(NM) -X64 -B -C *$(OBJ_SUFFIX)
++  DUMP_SYMBOLS_CMD := $(NM) $(NMFLAGS) -B -C *$(OBJ_SUFFIX)
+   FILTER_SYMBOLS_AWK_SCRIPT := \
+       '{ \
+         if (($$2="d" || $$2="D") && ($$3 ~ /^__vft/ || $$3 ~ /^gHotSpotVM/)) print $$3; \
 Index: make/hotspot/lib/JvmOverrideFiles.gmk
 IDEA additional info:
 Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
@@ -272,8 +441,45 @@ Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
 ===================================================================
 diff --git a/make/modules/java.desktop/lib/Awt2dLibraries.gmk b/make/modules/java.desktop/lib/Awt2dLibraries.gmk
 --- a/make/modules/java.desktop/lib/Awt2dLibraries.gmk	(revision 060c4f7589e7f13febd402f4dac3320f4c032b08)
-+++ b/make/modules/java.desktop/lib/Awt2dLibraries.gmk	(revision b739ccbad43fd9456e30fd990bf90d966150ee1f)
-@@ -546,7 +546,7 @@
++++ b/make/modules/java.desktop/lib/Awt2dLibraries.gmk	(revision 66ffa08a1eb301a088b8f50882b0c882ccbf179f)
+@@ -423,7 +423,6 @@
+     LIBFREETYPE_LIBS := -lfreetype
+   endif
+ 
+-  # gcc_ftobjs.c := maybe-uninitialized required for GCC 7 builds.
+   $(eval $(call SetupJdkLibrary, BUILD_LIBFREETYPE, \
+       NAME := freetype, \
+       OPTIMIZATION := HIGHEST, \
+@@ -432,7 +431,6 @@
+       EXTRA_HEADER_DIRS := $(BUILD_LIBFREETYPE_HEADER_DIRS), \
+       DISABLED_WARNINGS_microsoft := 4267 4244 4996, \
+       DISABLED_WARNINGS_gcc := dangling-pointer stringop-overflow, \
+-      DISABLED_WARNINGS_gcc_ftobjs.c := maybe-uninitialized, \
+       LDFLAGS := $(LDFLAGS_JDKLIB) \
+           $(call SET_SHARED_LIBRARY_ORIGIN), \
+   ))
+@@ -469,11 +467,18 @@
+    # hb-ft.cc is not presently needed, and requires freetype 2.4.2 or later.
+    LIBFONTMANAGER_EXCLUDE_FILES += libharfbuzz/hb-ft.cc
+ 
++   # list of disabled warnings and the compilers for which it was specifically added.
++   # array-bounds         -> GCC 12 on Alpine Linux
++   # parentheses          -> GCC 6
++   # range-loop-analysis  -> clang on Xcode12
++
+    HARFBUZZ_DISABLED_WARNINGS_gcc := missing-field-initializers strict-aliasing \
+-       unused-result array-bounds
++       unused-result array-bounds parentheses
+    # noexcept-type required for GCC 7 builds. Not required for GCC 8+.
+    # expansion-to-defined required for GCC 9 builds. Not required for GCC 10+.
+-   HARFBUZZ_DISABLED_WARNINGS_CXX_gcc := class-memaccess noexcept-type expansion-to-defined dangling-reference
++   # maybe-uninitialized required for GCC 8 builds. Not required for GCC 9+.
++   HARFBUZZ_DISABLED_WARNINGS_CXX_gcc := class-memaccess noexcept-type \
++       expansion-to-defined dangling-reference maybe-uninitialized
+    HARFBUZZ_DISABLED_WARNINGS_clang := missing-field-initializers range-loop-analysis
+    HARFBUZZ_DISABLED_WARNINGS_microsoft := 4267 4244
+ 
+@@ -546,7 +551,7 @@
      LDFLAGS_unix := -L$(INSTALL_LIBRARIES_HERE), \
      LDFLAGS_aix := -Wl$(COMMA)-berok, \
      LIBS := $(BUILD_LIBFONTMANAGER_FONTLIB), \
@@ -282,7 +488,7 @@ diff --git a/make/modules/java.desktop/lib/Awt2dLibraries.gmk b/make/modules/jav
      LIBS_macosx := -lawt_lwawt -framework CoreText -framework CoreFoundation -framework CoreGraphics, \
      LIBS_windows := $(WIN_JAVA_LIB) advapi32.lib user32.lib gdi32.lib \
          $(WIN_AWT_LIB), \
-@@ -799,7 +799,7 @@
+@@ -799,7 +804,7 @@
        LIBS_aix := -liconv, \
    ))
  
@@ -504,7 +710,16 @@ Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
 ===================================================================
 diff --git a/src/hotspot/os/linux/os_linux.cpp b/src/hotspot/os/linux/os_linux.cpp
 --- a/src/hotspot/os/linux/os_linux.cpp	(revision 060c4f7589e7f13febd402f4dac3320f4c032b08)
-+++ b/src/hotspot/os/linux/os_linux.cpp	(revision b739ccbad43fd9456e30fd990bf90d966150ee1f)
++++ b/src/hotspot/os/linux/os_linux.cpp	(revision 66ffa08a1eb301a088b8f50882b0c882ccbf179f)
+@@ -1,6 +1,6 @@
+ /*
+- * Copyright (c) 1999, 2023, Oracle and/or its affiliates. All rights reserved.
+- * Copyright (c) 2015, 2022 SAP SE. All rights reserved.
++ * Copyright (c) 1999, 2024, Oracle and/or its affiliates. All rights reserved.
++ * Copyright (c) 2015, 2024 SAP SE. All rights reserved.
+  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+  *
+  * This code is free software; you can redistribute it and/or modify it
 @@ -140,10 +140,10 @@
  // for timer info max values which include all bits
  #define ALL_64_BITS CONST64(0xFFFFFFFFFFFFFFFF)
@@ -550,6 +765,15 @@ diff --git a/src/hotspot/os/linux/os_linux.cpp b/src/hotspot/os/linux/os_linux.c
          #else
            #error define gettid for the arch
          #endif
+@@ -411,7 +415,7 @@
+ julong os::Linux::host_swap() {
+   struct sysinfo si;
+   sysinfo(&si);
+-  return (julong)si.totalswap;
++  return (julong)(si.totalswap * si.mem_unit);
+ }
+ 
+ // Most versions of linux have a bug where the number of processors are
 @@ -574,6 +578,7 @@
  // detecting pthread library
  
@@ -583,10 +807,21 @@ diff --git a/src/hotspot/os/linux/os_linux.cpp b/src/hotspot/os/linux/os_linux.c
  
  // check if addr is inside libjvm.so
  bool os::address_is_in_vm(address addr) {
-@@ -1511,6 +1525,30 @@
+@@ -1460,6 +1474,9 @@
    return false;
  }
  
++void os::prepare_native_symbols() {
++}
++
+ bool os::dll_address_to_function_name(address addr, char *buf,
+                                       int buflen, int *offset,
+                                       bool demangle) {
+@@ -1510,6 +1527,30 @@
+   if (offset) *offset = -1;
+   return false;
+ }
++
 +static bool read_so_path_from_maps(const char* so_name, char* buf, int buflen) {
 +  FILE *fp = fopen("/proc/self/maps", "r");
 +  assert(fp, "Failed to open /proc/self/maps");
@@ -610,11 +845,10 @@ diff --git a/src/hotspot/os/linux/os_linux.cpp b/src/hotspot/os/linux/os_linux.c
 +  fclose(fp);
 +  return false;
 +}
-+
+ 
  // Remember the stack's state. The Linux dynamic linker will change
  // the stack to 'executable' at most once, so we must safepoint only once.
- bool os::Linux::_stack_is_executable = false;
-@@ -1844,6 +1882,7 @@
+@@ -1844,6 +1885,7 @@
  }
  
  const char* os::Linux::dll_path(void* lib) {
@@ -622,7 +856,7 @@ diff --git a/src/hotspot/os/linux/os_linux.cpp b/src/hotspot/os/linux/os_linux.c
    struct link_map *lmap;
    const char* l_path = nullptr;
    assert(lib != nullptr, "dll_path parameter must not be null");
-@@ -1853,6 +1892,9 @@
+@@ -1853,6 +1895,9 @@
      l_path = lmap->l_name;
    }
    return l_path;
@@ -632,7 +866,32 @@ diff --git a/src/hotspot/os/linux/os_linux.cpp b/src/hotspot/os/linux/os_linux.c
  }
  
  static unsigned count_newlines(const char* s) {
-@@ -2608,6 +2650,20 @@
+@@ -2035,7 +2080,6 @@
+   "/etc/mandrake-release",
+   "/etc/sun-release",
+   "/etc/redhat-release",
+-  "/etc/SuSE-release",
+   "/etc/lsb-release",
+   "/etc/turbolinux-release",
+   "/etc/gentoo-release",
+@@ -2043,6 +2087,7 @@
+   "/etc/angstrom-version",
+   "/etc/system-release",
+   "/etc/os-release",
++  "/etc/SuSE-release", // Deprecated in favor of os-release since SuSE 12
+   nullptr };
+ 
+ void os::Linux::print_distro_info(outputStream* st) {
+@@ -2154,6 +2199,8 @@
+   // https://www.kernel.org/doc/Documentation/vm/transhuge.txt
+   _print_ascii_file_h("/sys/kernel/mm/transparent_hugepage/enabled",
+                       "/sys/kernel/mm/transparent_hugepage/enabled", st);
++  _print_ascii_file_h("/sys/kernel/mm/transparent_hugepage/hpage_pmd_size",
++                      "/sys/kernel/mm/transparent_hugepage/hpage_pmd_size", st);
+   _print_ascii_file_h("/sys/kernel/mm/transparent_hugepage/defrag (defrag/compaction efforts parameter)",
+                       "/sys/kernel/mm/transparent_hugepage/defrag", st);
+ }
+@@ -2608,6 +2655,20 @@
                                           CAST_FROM_FN_PTR(address, os::jvm_path),
                                           dli_fname, sizeof(dli_fname), nullptr);
    assert(ret, "cannot locate libjvm");
@@ -653,7 +912,7 @@ diff --git a/src/hotspot/os/linux/os_linux.cpp b/src/hotspot/os/linux/os_linux.c
    char *rp = nullptr;
    if (ret && dli_fname[0] != '\0') {
      rp = os::Posix::realpath(dli_fname, buf, buflen);
-@@ -2673,6 +2729,7 @@
+@@ -2673,6 +2734,7 @@
        }
      }
    }
@@ -661,7 +920,16 @@ diff --git a/src/hotspot/os/linux/os_linux.cpp b/src/hotspot/os/linux/os_linux.c
  
    strncpy(saved_jvm_path, buf, MAXPATHLEN);
    saved_jvm_path[MAXPATHLEN - 1] = '\0';
-@@ -2988,7 +3045,8 @@
+@@ -2690,6 +2752,8 @@
+ void linux_wrap_code(char* base, size_t size) {
+   static volatile jint cnt = 0;
+ 
++  static_assert(sizeof(off_t) == 8, "Expected Large File Support in this file");
++
+   if (!UseOprofile) {
+     return;
+   }
+@@ -2988,7 +3052,8 @@
    }
  
    if (sched_getcpu() == -1) {
@@ -671,7 +939,7 @@ diff --git a/src/hotspot/os/linux/os_linux.cpp b/src/hotspot/os/linux/os_linux.c
    }
  }
  
-@@ -3019,14 +3077,8 @@
+@@ -3019,14 +3084,8 @@
    // Especially in dockers, get_mempolicy is not allowed with the default configuration. So it's necessary
    // to check whether the syscalls are available. Currently, only get_mempolicy is checked since checking
    // others like mbind would cause unexpected side effects.
@@ -688,7 +956,7 @@ diff --git a/src/hotspot/os/linux/os_linux.cpp b/src/hotspot/os/linux/os_linux.c
  }
  
  bool os::Linux::libnuma_init() {
-@@ -3629,6 +3681,7 @@
+@@ -3629,6 +3688,7 @@
  }
  
  bool os::Linux::shm_hugetlbfs_sanity_check(bool warn, size_t page_size) {
@@ -696,7 +964,7 @@ diff --git a/src/hotspot/os/linux/os_linux.cpp b/src/hotspot/os/linux/os_linux.c
    // Try to create a large shared memory segment.
    int shmid = shmget(IPC_PRIVATE, page_size, SHM_HUGETLB|IPC_CREAT|SHM_R|SHM_W);
    if (shmid == -1) {
-@@ -3650,6 +3703,10 @@
+@@ -3650,6 +3710,10 @@
    // Managed to create a segment, now delete it.
    shmctl(shmid, IPC_RMID, nullptr);
    return true;
@@ -707,7 +975,33 @@ diff --git a/src/hotspot/os/linux/os_linux.cpp b/src/hotspot/os/linux/os_linux.c
  }
  
  // From the coredump_filter documentation:
-@@ -3883,6 +3940,8 @@
+@@ -3802,15 +3866,17 @@
+     return;
+   }
+ 
+-  // 2) check if large pages are configured
+-  if ( ( UseTransparentHugePages && HugePages::supports_thp() == false) ||
+-       (!UseTransparentHugePages && HugePages::supports_static_hugepages() == false) ) {
+-    // No large pages configured, return.
++  // 2) check if the OS supports THPs resp. static hugepages.
++  if (UseTransparentHugePages && !HugePages::supports_thp()) {
++    if (!FLAG_IS_DEFAULT(UseTransparentHugePages)) {
++      log_warning(pagesize)("UseTransparentHugePages disabled, transparent huge pages are not supported by the operating system.");
++    }
++    UseLargePages = UseTransparentHugePages = UseHugeTLBFS = UseSHM = false;
++    return;
++  }
++  if (!UseTransparentHugePages && !HugePages::supports_static_hugepages()) {
+     warn_no_large_pages_configured();
+-    UseLargePages = false;
+-    UseTransparentHugePages = false;
+-    UseHugeTLBFS = false;
+-    UseSHM = false;
++    UseLargePages = UseTransparentHugePages = UseHugeTLBFS = UseSHM = false;
+     return;
+   }
+ 
+@@ -3883,6 +3949,8 @@
    #define SHM_HUGETLB 04000
  #endif
  
@@ -716,7 +1010,7 @@ diff --git a/src/hotspot/os/linux/os_linux.cpp b/src/hotspot/os/linux/os_linux.c
  #define shm_warning_format(format, ...)              \
    do {                                               \
      if (UseLargePages &&                             \
-@@ -3975,8 +4034,11 @@
+@@ -3975,8 +4043,11 @@
    }
  }
  
@@ -728,7 +1022,7 @@ diff --git a/src/hotspot/os/linux/os_linux.cpp b/src/hotspot/os/linux/os_linux.c
    // "exec" is passed in but not used.  Creating the shared image for
    // the code cache doesn't have an SHM_X executable permission to check.
    assert(UseLargePages && UseSHM, "only for SHM large pages");
-@@ -4021,6 +4083,10 @@
+@@ -4021,6 +4092,10 @@
    shmctl(shmid, IPC_RMID, nullptr);
  
    return addr;
@@ -739,7 +1033,7 @@ diff --git a/src/hotspot/os/linux/os_linux.cpp b/src/hotspot/os/linux/os_linux.c
  }
  
  static void log_on_commit_special_failure(char* req_addr, size_t bytes,
-@@ -4147,8 +4213,13 @@
+@@ -4147,8 +4222,13 @@
  }
  
  bool os::Linux::release_memory_special_shm(char* base, size_t bytes) {
@@ -753,7 +1047,47 @@ diff --git a/src/hotspot/os/linux/os_linux.cpp b/src/hotspot/os/linux/os_linux.c
  }
  
  bool os::Linux::release_memory_special_huge_tlbfs(char* base, size_t bytes) {
-@@ -5232,7 +5303,46 @@
+@@ -5006,14 +5086,14 @@
+   oflag |= O_CLOEXEC;
+ #endif
+ 
+-  int fd = ::open64(path, oflag, mode);
++  int fd = ::open(path, oflag, mode);
+   if (fd == -1) return -1;
+ 
+   //If the open succeeded, the file might still be a directory
+   {
+-    struct stat64 buf64;
+-    int ret = ::fstat64(fd, &buf64);
+-    int st_mode = buf64.st_mode;
++    struct stat buf;
++    int ret = ::fstat(fd, &buf);
++    int st_mode = buf.st_mode;
+ 
+     if (ret != -1) {
+       if ((st_mode & S_IFMT) == S_IFDIR) {
+@@ -5050,17 +5130,17 @@
+ int os::create_binary_file(const char* path, bool rewrite_existing) {
+   int oflags = O_WRONLY | O_CREAT;
+   oflags |= rewrite_existing ? O_TRUNC : O_EXCL;
+-  return ::open64(path, oflags, S_IREAD | S_IWRITE);
++  return ::open(path, oflags, S_IREAD | S_IWRITE);
+ }
+ 
+ // return current position of file pointer
+ jlong os::current_file_offset(int fd) {
+-  return (jlong)::lseek64(fd, (off64_t)0, SEEK_CUR);
++  return (jlong)::lseek(fd, (off_t)0, SEEK_CUR);
+ }
+ 
+ // move file pointer to the specified offset
+ jlong os::seek_to_file_offset(int fd, jlong offset) {
+-  return (jlong)::lseek64(fd, (off64_t)offset, SEEK_SET);
++  return (jlong)::lseek(fd, (off_t)offset, SEEK_SET);
+ }
+ 
+ // Map a block of memory.
+@@ -5232,7 +5312,46 @@
  // Linux doesn't yet have a (official) notion of processor sets,
  // so just return the system wide load average.
  int os::loadavg(double loadavg[], int nelem) {
@@ -801,6 +1135,32 @@ diff --git a/src/hotspot/os/linux/os_linux.cpp b/src/hotspot/os/linux/os_linux.c
  }
  
  // Get the default path to the core file
+@@ -5561,3 +5680,25 @@
+   return false; // musl
+ #endif
+ }
++
++bool os::pd_dll_unload(void* libhandle, char* ebuf, int ebuflen) {
++
++  if (ebuf && ebuflen > 0) {
++    ebuf[0] = '\0';
++    ebuf[ebuflen - 1] = '\0';
++  }
++
++  bool res = (0 == ::dlclose(libhandle));
++  if (!res) {
++    // error analysis when dlopen fails
++    const char* error_report = ::dlerror();
++    if (error_report == nullptr) {
++      error_report = "dlerror returned no error description";
++    }
++    if (ebuf != nullptr && ebuflen > 0) {
++      snprintf(ebuf, ebuflen - 1, "%s", error_report);
++    }
++  }
++
++  return res;
++} // end: os::pd_dll_unload()
 Index: src/hotspot/os/linux/os_perf_linux.cpp
 IDEA additional info:
 Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
@@ -1129,8 +1489,23 @@ Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
 ===================================================================
 diff --git a/src/hotspot/os/posix/os_posix.cpp b/src/hotspot/os/posix/os_posix.cpp
 --- a/src/hotspot/os/posix/os_posix.cpp	(revision 060c4f7589e7f13febd402f4dac3320f4c032b08)
-+++ b/src/hotspot/os/posix/os_posix.cpp	(revision b739ccbad43fd9456e30fd990bf90d966150ee1f)
-@@ -74,7 +74,9 @@
++++ b/src/hotspot/os/posix/os_posix.cpp	(revision 66ffa08a1eb301a088b8f50882b0c882ccbf179f)
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (c) 1999, 2023, Oracle and/or its affiliates. All rights reserved.
++ * Copyright (c) 1999, 2024, Oracle and/or its affiliates. All rights reserved.
+  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+  *
+  * This code is free software; you can redistribute it and/or modify it
+@@ -50,6 +50,7 @@
+ #include "utilities/vmError.hpp"
+ #ifdef AIX
+ #include "loadlib_aix.hpp"
++#include "os_aix.hpp"
+ #endif
+ #ifdef LINUX
+ #include "os_linux.hpp"
+@@ -74,7 +75,9 @@
  #include <sys/wait.h>
  #include <time.h>
  #include <unistd.h>
@@ -1140,7 +1515,15 @@ diff --git a/src/hotspot/os/posix/os_posix.cpp b/src/hotspot/os/posix/os_posix.c
  
  #ifdef __APPLE__
    #include <crt_externs.h>
-@@ -453,6 +455,7 @@
+@@ -293,6 +296,7 @@
+ }
+ 
+ static int util_posix_fallocate(int fd, off_t offset, off_t len) {
++  static_assert(sizeof(off_t) == 8, "Expected Large File Support in this file");
+ #ifdef __APPLE__
+   fstore_t store = { F_ALLOCATECONTIG, F_PEOFPOSMODE, 0, len };
+   // First we try to get a continuous chunk of disk space
+@@ -453,6 +457,7 @@
  // unfortunately it does not work on macOS and Linux because the utx chain has no entry
  // for reboot at least on my test machines
  void os::Posix::print_uptime_info(outputStream* st) {
@@ -1148,7 +1531,7 @@ diff --git a/src/hotspot/os/posix/os_posix.cpp b/src/hotspot/os/posix/os_posix.c
    int bootsec = -1;
    int currsec = time(nullptr);
    struct utmpx* ent;
-@@ -467,6 +470,7 @@
+@@ -467,6 +472,7 @@
    if (bootsec != -1) {
      os::print_dhm(st, "OS uptime:", (long) (currsec-bootsec));
    }
@@ -1156,7 +1539,50 @@ diff --git a/src/hotspot/os/posix/os_posix.cpp b/src/hotspot/os/posix/os_posix.c
  }
  
  static void print_rlimit(outputStream* st, const char* msg,
-@@ -1923,11 +1927,31 @@
+@@ -733,34 +739,29 @@
+   if (l_path == nullptr) {
+     l_path = "<not available>";
+   }
+-  int res = ::dlclose(lib);
+ 
+-  if (res == 0) {
++  char ebuf[1024];
++  bool res = os::pd_dll_unload(lib, ebuf, sizeof(ebuf));
++
++  if (res) {
+     Events::log_dll_message(nullptr, "Unloaded shared library \"%s\" [" INTPTR_FORMAT "]",
+                             l_path, p2i(lib));
+     log_info(os)("Unloaded shared library \"%s\" [" INTPTR_FORMAT "]", l_path, p2i(lib));
+   } else {
+-    const char* error_report = ::dlerror();
+-    if (error_report == nullptr) {
+-      error_report = "dlerror returned no error description";
+-    }
+-
+     Events::log_dll_message(nullptr, "Attempt to unload shared library \"%s\" [" INTPTR_FORMAT "] failed, %s",
+-                            l_path, p2i(lib), error_report);
++                            l_path, p2i(lib), ebuf);
+     log_info(os)("Attempt to unload shared library \"%s\" [" INTPTR_FORMAT "] failed, %s",
+-                  l_path, p2i(lib), error_report);
++                  l_path, p2i(lib), ebuf);
+   }
+-  // Update the dll cache
+-  AIX_ONLY(LoadedLibraries::reload());
+   LINUX_ONLY(os::free(l_pathdup));
+ }
+ 
+ jlong os::lseek(int fd, jlong offset, int whence) {
+-  return (jlong) BSD_ONLY(::lseek) NOT_BSD(::lseek64)(fd, offset, whence);
++  return (jlong) AIX_ONLY(::lseek64) NOT_AIX(::lseek)(fd, offset, whence);
+ }
+ 
+ int os::ftruncate(int fd, jlong length) {
+-   return BSD_ONLY(::ftruncate) NOT_BSD(::ftruncate64)(fd, length);
++   return AIX_ONLY(::ftruncate64) NOT_AIX(::ftruncate)(fd, length);
+ }
+ 
+ const char* os::get_current_directory(char *buf, size_t buflen) {
+@@ -1923,11 +1924,31 @@
    const char* argv[4] = {"sh", "-c", cmd, nullptr};
    pid_t pid = -1;
    char** env = os::get_environ();
@@ -1188,7 +1614,7 @@ diff --git a/src/hotspot/os/posix/os_posix.cpp b/src/hotspot/os/posix/os_posix.c
      int status;
      // Wait for the child process to exit.  This returns immediately if
      // the child has already exited. */
-@@ -1952,9 +1976,11 @@
+@@ -1952,9 +1973,11 @@
        // Unknown exit code; pass it through
        return status;
      }
@@ -1506,11 +1932,19 @@ Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
 ===================================================================
 diff --git a/src/java.base/unix/native/libjava/java_props_md.c b/src/java.base/unix/native/libjava/java_props_md.c
 --- a/src/java.base/unix/native/libjava/java_props_md.c	(revision 060c4f7589e7f13febd402f4dac3320f4c032b08)
-+++ b/src/java.base/unix/native/libjava/java_props_md.c	(revision b739ccbad43fd9456e30fd990bf90d966150ee1f)
-@@ -46,6 +46,100 @@
++++ b/src/java.base/unix/native/libjava/java_props_md.c	(revision 66ffa08a1eb301a088b8f50882b0c882ccbf179f)
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (c) 1998, 2022, Oracle and/or its affiliates. All rights reserved.
++ * Copyright (c) 1998, 2023, Oracle and/or its affiliates. All rights reserved.
+  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+  *
+  * This code is free software; you can redistribute it and/or modify it
+@@ -45,6 +45,100 @@
+ #ifdef MACOSX
  #include "java_props_macosx.h"
  #endif
- 
++
 +#ifdef __ANDROID__
 +// From https://android.googlesource.com/platform/bionic/+/master/libc/bionic/langinfo.cpp
 +/*
@@ -1604,10 +2038,33 @@ diff --git a/src/java.base/unix/native/libjava/java_props_md.c b/src/java.base/u
 +  return (char*) result;
 +}
 +#endif
-+
+ 
  #if defined(_ALLBSD_SOURCE)
  #if !defined(P_tmpdir)
- #include <paths.h>
+@@ -238,6 +332,11 @@
+         *std_language = "en";
+         if (language != NULL && mapLookup(language_names, language, std_language) == 0) {
+             *std_language = malloc(strlen(language)+1);
++            if (*std_language == NULL) {
++                free(encoding_variant);
++                JNU_ThrowOutOfMemoryError(env, NULL);
++                return 0;
++            }
+             strcpy(*std_language, language);
+         }
+     }
+@@ -246,6 +345,11 @@
+     if (std_country != NULL && country != NULL) {
+         if (mapLookup(country_names, country, std_country) == 0) {
+             *std_country = malloc(strlen(country)+1);
++            if (*std_country == NULL) {
++                free(encoding_variant);
++                JNU_ThrowOutOfMemoryError(env, NULL);
++                return 0;
++            }
+             strcpy(*std_country, country);
+         }
+     }
 Index: src/java.base/unix/native/libjava/jni_util_md.c
 IDEA additional info:
 Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
@@ -1729,8 +2186,129 @@ Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
 ===================================================================
 diff --git a/src/java.base/unix/native/libnio/fs/UnixNativeDispatcher.c b/src/java.base/unix/native/libnio/fs/UnixNativeDispatcher.c
 --- a/src/java.base/unix/native/libnio/fs/UnixNativeDispatcher.c	(revision 060c4f7589e7f13febd402f4dac3320f4c032b08)
-+++ b/src/java.base/unix/native/libnio/fs/UnixNativeDispatcher.c	(revision b739ccbad43fd9456e30fd990bf90d966150ee1f)
-@@ -140,6 +140,7 @@
++++ b/src/java.base/unix/native/libnio/fs/UnixNativeDispatcher.c	(revision 66ffa08a1eb301a088b8f50882b0c882ccbf179f)
+@@ -51,6 +51,7 @@
+ 
+ #ifdef __linux__
+ #include <sys/syscall.h>
++#include <sys/sysmacros.h> // makedev macros
+ #endif
+ 
+ #if defined(__linux__) || defined(_AIX)
+@@ -71,6 +72,98 @@
+ #define readdir64 readdir
+ #endif
+ 
++#if defined(__linux__)
++// Account for the case where we compile on a system without statx
++// support. We still want to ensure we can call statx at runtime
++// if the runtime glibc version supports it (>= 2.28). We do this
++// by defining binary compatible statx structs in this file and
++// not relying on included headers.
++
++#ifndef __GLIBC__
++// Alpine doesn't know these types, define them
++typedef unsigned int       __uint32_t;
++typedef unsigned short     __uint16_t;
++typedef unsigned long int  __uint64_t;
++#endif
++
++/*
++ * Timestamp structure for the timestamps in struct statx.
++ */
++struct my_statx_timestamp {
++        int64_t   tv_sec;
++        __uint32_t  tv_nsec;
++        int32_t   __reserved;
++};
++
++/*
++ * struct statx used by statx system call on >= glibc 2.28
++ * systems
++ */
++struct my_statx
++{
++  __uint32_t stx_mask;
++  __uint32_t stx_blksize;
++  __uint64_t stx_attributes;
++  __uint32_t stx_nlink;
++  __uint32_t stx_uid;
++  __uint32_t stx_gid;
++  __uint16_t stx_mode;
++  __uint16_t __statx_pad1[1];
++  __uint64_t stx_ino;
++  __uint64_t stx_size;
++  __uint64_t stx_blocks;
++  __uint64_t stx_attributes_mask;
++  struct my_statx_timestamp stx_atime;
++  struct my_statx_timestamp stx_btime;
++  struct my_statx_timestamp stx_ctime;
++  struct my_statx_timestamp stx_mtime;
++  __uint32_t stx_rdev_major;
++  __uint32_t stx_rdev_minor;
++  __uint32_t stx_dev_major;
++  __uint32_t stx_dev_minor;
++  __uint64_t __statx_pad2[14];
++};
++
++// statx masks, flags, constants
++
++#ifndef AT_SYMLINK_NOFOLLOW
++#define AT_SYMLINK_NOFOLLOW 0x100
++#endif
++
++#ifndef AT_STATX_SYNC_AS_STAT
++#define AT_STATX_SYNC_AS_STAT 0x0000
++#endif
++
++#ifndef AT_EMPTY_PATH
++#define AT_EMPTY_PATH 0x1000
++#endif
++
++#ifndef STATX_BASIC_STATS
++#define STATX_BASIC_STATS 0x000007ffU
++#endif
++
++#ifndef STATX_BTIME
++#define STATX_BTIME 0x00000800U
++#endif
++
++#ifndef STATX_ALL
++#define STATX_ALL (STATX_BTIME | STATX_BASIC_STATS)
++#endif
++
++#ifndef AT_FDCWD
++#define AT_FDCWD -100
++#endif
++
++#ifndef RTLD_DEFAULT
++#define RTLD_DEFAULT RTLD_LOCAL
++#endif
++
++#define NO_FOLLOW_SYMLINK 1
++#define FOLLOW_SYMLINK 0
++
++#endif // __linux__
++
++
+ #include "jni.h"
+ #include "jni_util.h"
+ #include "jlong.h"
+@@ -117,9 +210,12 @@
+ static jfieldID attrs_st_ctime_sec;
+ static jfieldID attrs_st_ctime_nsec;
+ 
+-#ifdef _DARWIN_FEATURE_64_BIT_INODE
++#if defined(_DARWIN_FEATURE_64_BIT_INODE) || defined(__linux__)
+ static jfieldID attrs_st_birthtime_sec;
+ #endif
++#if defined(__linux__) // Linux has nsec granularity if supported
++static jfieldID attrs_st_birthtime_nsec;
++#endif
+ 
+ static jfieldID attrs_f_frsize;
+ static jfieldID attrs_f_blocks;
+@@ -140,18 +236,62 @@
  typedef int unlinkat_func(int, const char*, int);
  typedef int renameat_func(int, const char*, int, const char*);
  typedef int futimesat_func(int, const char *, const struct timeval *);
@@ -1738,7 +2316,13 @@ diff --git a/src/java.base/unix/native/libnio/fs/UnixNativeDispatcher.c b/src/ja
  typedef int futimens_func(int, const struct timespec *);
  typedef int lutimes_func(const char *, const struct timeval *);
  typedef DIR* fdopendir_func(int);
-@@ -149,10 +150,46 @@
++#if defined(__linux__)
++typedef int statx_func(int dirfd, const char *restrict pathname, int flags,
++                       unsigned int mask, struct my_statx *restrict statxbuf);
++#endif
+ 
+ static openat64_func* my_openat64_func = NULL;
+ static fstatat64_func* my_fstatat64_func = NULL;
  static unlinkat_func* my_unlinkat_func = NULL;
  static renameat_func* my_renameat_func = NULL;
  static futimesat_func* my_futimesat_func = NULL;
@@ -1746,7 +2330,10 @@ diff --git a/src/java.base/unix/native/libnio/fs/UnixNativeDispatcher.c b/src/ja
  static futimens_func* my_futimens_func = NULL;
  static lutimes_func* my_lutimes_func = NULL;
  static fdopendir_func* my_fdopendir_func = NULL;
- 
++#if defined(__linux__)
++static statx_func* my_statx_func = NULL;
++#endif
++
 +#ifdef __ANDROID__
 +/*
 + * TODO: Android lacks support for the methods listed below.  In it's place are
@@ -1781,11 +2368,40 @@ diff --git a/src/java.base/unix/native/libnio/fs/UnixNativeDispatcher.c b/src/ja
 +
 +}
 +#endif
-+
+ 
  /**
   * fstatat missing from glibc on Linux.
-  */
-@@ -273,6 +310,9 @@
+@@ -177,6 +317,13 @@
+ }
+ #endif
+ 
++#if defined(__linux__)
++static int statx_wrapper(int dirfd, const char *restrict pathname, int flags,
++                         unsigned int mask, struct my_statx *restrict statxbuf) {
++    return (*my_statx_func)(dirfd, pathname, flags, mask, statxbuf);
++}
++#endif
++
+ /**
+  * Call this to throw an internal UnixException when a system/library
+  * call fails
+@@ -229,10 +376,14 @@
+     attrs_st_ctime_nsec = (*env)->GetFieldID(env, clazz, "st_ctime_nsec", "J");
+     CHECK_NULL_RETURN(attrs_st_ctime_nsec, 0);
+ 
+-#ifdef _DARWIN_FEATURE_64_BIT_INODE
++#if defined(_DARWIN_FEATURE_64_BIT_INODE) || defined(__linux__)
+     attrs_st_birthtime_sec = (*env)->GetFieldID(env, clazz, "st_birthtime_sec", "J");
+     CHECK_NULL_RETURN(attrs_st_birthtime_sec, 0);
+ #endif
++#if defined (__linux__) // Linux has nsec granularity
++    attrs_st_birthtime_nsec = (*env)->GetFieldID(env, clazz, "st_birthtime_nsec", "J");
++    CHECK_NULL_RETURN(attrs_st_birthtime_nsec, 0);
++#endif
+ 
+     clazz = (*env)->FindClass(env, "sun/nio/fs/UnixFileStoreAttributes");
+     CHECK_NULL_RETURN(clazz, 0);
+@@ -273,6 +424,9 @@
      my_futimesat_func = (futimesat_func*) dlsym(RTLD_DEFAULT, "futimesat");
      my_lutimes_func = (lutimes_func*) dlsym(RTLD_DEFAULT, "lutimes");
  #endif
@@ -1795,7 +2411,7 @@ diff --git a/src/java.base/unix/native/libnio/fs/UnixNativeDispatcher.c b/src/ja
      my_futimens_func = (futimens_func*) dlsym(RTLD_DEFAULT, "futimens");
  #if defined(_AIX)
      my_fdopendir_func = (fdopendir_func*) dlsym(RTLD_DEFAULT, "fdopendir64");
-@@ -292,7 +332,7 @@
+@@ -292,7 +446,7 @@
      capabilities |= sun_nio_fs_UnixNativeDispatcher_SUPPORTS_FUTIMES;
      capabilities |= sun_nio_fs_UnixNativeDispatcher_SUPPORTS_LUTIMES;
  #else
@@ -1804,7 +2420,7 @@ diff --git a/src/java.base/unix/native/libnio/fs/UnixNativeDispatcher.c b/src/ja
          capabilities |= sun_nio_fs_UnixNativeDispatcher_SUPPORTS_FUTIMES;
      if (my_lutimes_func != NULL)
          capabilities |= sun_nio_fs_UnixNativeDispatcher_SUPPORTS_LUTIMES;
-@@ -304,7 +344,7 @@
+@@ -304,7 +458,7 @@
  
      if (my_openat64_func != NULL &&  my_fstatat64_func != NULL &&
          my_unlinkat_func != NULL && my_renameat_func != NULL &&
@@ -1813,7 +2429,191 @@ diff --git a/src/java.base/unix/native/libnio/fs/UnixNativeDispatcher.c b/src/ja
      {
          capabilities |= sun_nio_fs_UnixNativeDispatcher_SUPPORTS_OPENAT;
      }
-@@ -675,22 +715,30 @@
+@@ -314,6 +468,12 @@
+ #ifdef _DARWIN_FEATURE_64_BIT_INODE
+     capabilities |= sun_nio_fs_UnixNativeDispatcher_SUPPORTS_BIRTHTIME;
+ #endif
++#if defined(__linux__)
++    my_statx_func = (statx_func*) dlsym(RTLD_DEFAULT, "statx");
++    if (my_statx_func != NULL) {
++        capabilities |= sun_nio_fs_UnixNativeDispatcher_SUPPORTS_BIRTHTIME;
++    }
++#endif
+ 
+     /* supports extended attributes */
+ 
+@@ -490,10 +650,37 @@
+     return (jint)n;
+ }
+ 
++#if defined(__linux__)
++/**
++ * Copy statx members into sun.nio.fs.UnixFileAttributes
++ */
++static void copy_statx_attributes(JNIEnv* env, struct my_statx* buf, jobject attrs) {
++    (*env)->SetIntField(env, attrs, attrs_st_mode, (jint)buf->stx_mode);
++    (*env)->SetLongField(env, attrs, attrs_st_ino, (jlong)buf->stx_ino);
++    (*env)->SetIntField(env, attrs, attrs_st_nlink, (jint)buf->stx_nlink);
++    (*env)->SetIntField(env, attrs, attrs_st_uid, (jint)buf->stx_uid);
++    (*env)->SetIntField(env, attrs, attrs_st_gid, (jint)buf->stx_gid);
++    (*env)->SetLongField(env, attrs, attrs_st_size, (jlong)buf->stx_size);
++    (*env)->SetLongField(env, attrs, attrs_st_atime_sec, (jlong)buf->stx_atime.tv_sec);
++    (*env)->SetLongField(env, attrs, attrs_st_mtime_sec, (jlong)buf->stx_mtime.tv_sec);
++    (*env)->SetLongField(env, attrs, attrs_st_ctime_sec, (jlong)buf->stx_ctime.tv_sec);
++    (*env)->SetLongField(env, attrs, attrs_st_birthtime_sec, (jlong)buf->stx_btime.tv_sec);
++    (*env)->SetLongField(env, attrs, attrs_st_birthtime_nsec, (jlong)buf->stx_btime.tv_nsec);
++    (*env)->SetLongField(env, attrs, attrs_st_atime_nsec, (jlong)buf->stx_atime.tv_nsec);
++    (*env)->SetLongField(env, attrs, attrs_st_mtime_nsec, (jlong)buf->stx_mtime.tv_nsec);
++    (*env)->SetLongField(env, attrs, attrs_st_ctime_nsec, (jlong)buf->stx_ctime.tv_nsec);
++    // convert statx major:minor to dev_t using makedev
++    dev_t dev = makedev(buf->stx_dev_major, buf->stx_dev_minor);
++    dev_t rdev = makedev(buf->stx_rdev_major, buf->stx_rdev_minor);
++    (*env)->SetLongField(env, attrs, attrs_st_dev, (jlong)dev);
++    (*env)->SetLongField(env, attrs, attrs_st_rdev, (jlong)rdev);
++}
++#endif
++
+ /**
+  * Copy stat64 members into sun.nio.fs.UnixFileAttributes
+  */
+-static void prepAttributes(JNIEnv* env, struct stat64* buf, jobject attrs) {
++static void copy_stat64_attributes(JNIEnv* env, struct stat64* buf, jobject attrs) {
+     (*env)->SetIntField(env, attrs, attrs_st_mode, (jint)buf->st_mode);
+     (*env)->SetLongField(env, attrs, attrs_st_ino, (jlong)buf->st_ino);
+     (*env)->SetLongField(env, attrs, attrs_st_dev, (jlong)buf->st_dev);
+@@ -508,6 +695,7 @@
+ 
+ #ifdef _DARWIN_FEATURE_64_BIT_INODE
+     (*env)->SetLongField(env, attrs, attrs_st_birthtime_sec, (jlong)buf->st_birthtime);
++    // rely on default value of 0 for st_birthtime_nsec field on Darwin
+ #endif
+ 
+ #ifndef MACOSX
+@@ -528,10 +716,25 @@
+     int err;
+     struct stat64 buf;
+     const char* path = (const char*)jlong_to_ptr(pathAddress);
++#if defined(__linux__)
++    struct my_statx statx_buf;
++    int flags = AT_STATX_SYNC_AS_STAT;
++    unsigned int mask = STATX_ALL;
+ 
++    if (my_statx_func != NULL) {
++        // Prefer statx over stat64 on Linux if it's available
++        RESTARTABLE(statx_wrapper(AT_FDCWD, path, flags, mask, &statx_buf), err);
++        if (err == 0) {
++            copy_statx_attributes(env, &statx_buf, attrs);
++            return 0;
++        } else {
++            return errno;
++        }
++    }
++#endif
+     RESTARTABLE(stat64(path, &buf), err);
+     if (err == 0) {
+-        prepAttributes(env, &buf, attrs);
++        copy_stat64_attributes(env, &buf, attrs);
+         return 0;
+     } else {
+         return errno;
+@@ -545,12 +748,28 @@
+     int err;
+     struct stat64 buf;
+     const char* path = (const char*)jlong_to_ptr(pathAddress);
++#if defined(__linux__)
++    struct my_statx statx_buf;
++    int flags = AT_STATX_SYNC_AS_STAT | AT_SYMLINK_NOFOLLOW;
++    unsigned int mask = STATX_ALL;
+ 
++    if (my_statx_func != NULL) {
++        // Prefer statx over stat64 on Linux if it's available
++        RESTARTABLE(statx_wrapper(AT_FDCWD, path, flags, mask, &statx_buf), err);
++        if (err == 0) {
++            copy_statx_attributes(env, &statx_buf, attrs);
++        } else {
++            throwUnixException(env, errno);
++        }
++        // statx was available, so return now
++        return;
++    }
++#endif
+     RESTARTABLE(lstat64(path, &buf), err);
+     if (err == -1) {
+         throwUnixException(env, errno);
+     } else {
+-        prepAttributes(env, &buf, attrs);
++        copy_stat64_attributes(env, &buf, attrs);
+     }
+ }
+ 
+@@ -560,12 +779,29 @@
+ {
+     int err;
+     struct stat64 buf;
++#if defined(__linux__)
++    struct my_statx statx_buf;
++    int flags = AT_EMPTY_PATH | AT_STATX_SYNC_AS_STAT;
++    unsigned int mask = STATX_ALL;
+ 
++    if (my_statx_func != NULL) {
++        // statx supports FD use via dirfd iff pathname is an empty string and the
++        // AT_EMPTY_PATH flag is specified in flags
++        RESTARTABLE(statx_wrapper((int)fd, "", flags, mask, &statx_buf), err);
++        if (err == 0) {
++            copy_statx_attributes(env, &statx_buf, attrs);
++        } else {
++            throwUnixException(env, errno);
++        }
++        // statx was available, so return now
++        return;
++    }
++#endif
+     RESTARTABLE(fstat64((int)fd, &buf), err);
+     if (err == -1) {
+         throwUnixException(env, errno);
+     } else {
+-        prepAttributes(env, &buf, attrs);
++        copy_stat64_attributes(env, &buf, attrs);
+     }
+ }
+ 
+@@ -576,6 +812,26 @@
+     int err;
+     struct stat64 buf;
+     const char* path = (const char*)jlong_to_ptr(pathAddress);
++#if defined(__linux__)
++    struct my_statx statx_buf;
++    int flags = AT_STATX_SYNC_AS_STAT;
++    unsigned int mask = STATX_ALL;
++
++    if (my_statx_func != NULL) {
++        // Prefer statx over stat64 on Linux if it's available
++        if (((int)flag & AT_SYMLINK_NOFOLLOW) > 0) { // flag set in java code
++            flags |= AT_SYMLINK_NOFOLLOW;
++        }
++        RESTARTABLE(statx_wrapper((int)dfd, path, flags, mask, &statx_buf), err);
++        if (err == 0) {
++            copy_statx_attributes(env, &statx_buf, attrs);
++        } else {
++            throwUnixException(env, errno);
++        }
++        // statx was available, so return now
++        return;
++    }
++#endif
+ 
+     if (my_fstatat64_func == NULL) {
+         JNU_ThrowInternalError(env, "should not reach here");
+@@ -585,7 +841,7 @@
+     if (err == -1) {
+         throwUnixException(env, errno);
+     } else {
+-        prepAttributes(env, &buf, attrs);
++        copy_stat64_attributes(env, &buf, attrs);
+     }
+ }
+ 
+@@ -675,22 +931,30 @@
      jlong accessTime, jlong modificationTime)
  {
      struct timeval times[2];
