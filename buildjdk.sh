@@ -39,7 +39,7 @@ if [ "$BUILD_IOS" != "1" ]; then
     STRIP=$STRIP \
     "
 
-  export BOOT_JDK=$PWD/jdk-20
+  export BOOT_JDK=$PWD/jdk-22
   export CFLAGS+=" -DANDROID"
   export LDFLAGS+=" -L$PWD/dummy_libs" 
 
